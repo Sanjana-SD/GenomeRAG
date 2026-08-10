@@ -1,6 +1,9 @@
 import random
-from typing import List, Tuple
+from typing import Tuple
+
 from deap import base, creator, tools
+
+from evolution.benchmark import evaluate_genome_fitness
 from genome.genome import MemoryGenome
 
 # Define gene bounds for the 10 parameters in order
@@ -50,31 +53,14 @@ def mutate_gaussian(individual: list, indpb: float = 0.2) -> Tuple[list]:
             individual[i] = max(low, min(high, individual[i]))
     return (individual,)
 
-def evaluate_dummy(individual: list) -> Tuple[float]:
-    """
-    Toy fitness function designed to optimize towards:
-        - forgetting_rate: 0.1
-        - retrieval_top_k: 8.0
-        - similarity_threshold: 0.5
-        - memory_capacity: 500.0
-    Returns a fitness score where higher is better (max value is 0.0).
-    """
-    # Map genes to target values
-    f_rate = individual[0]
-    top_k = individual[5]
-    sim_thresh = individual[8]
-    capacity = individual[9]
-    
-    # Negative absolute error from target
-    score = (
-        - abs(f_rate - 0.1)
-        - abs(top_k - 8.0) / 20.0
-        - abs(sim_thresh - 0.5)
-        - abs(capacity - 500.0) / 1000.0
-    )
-    return (score,)
+def evaluate_real_genome(individual: list) -> Tuple[float]:
+    """Builds a genome from the DEAP individual and scores it on the real benchmark."""
+    genome = MemoryGenome.from_list(individual)
+    score = evaluate_genome_fitness(genome, verbose=False)
+    return score
 
-def setup_toolbox(evaluation_func=evaluate_dummy) -> base.Toolbox:
+
+def setup_toolbox(evaluation_func=evaluate_real_genome) -> base.Toolbox:
     """Configures the DEAP toolbox with individuals, population, and operators."""
     toolbox = base.Toolbox()
     
@@ -164,3 +150,26 @@ def run_evolution_loop(
             
     best_ind = tools.selBest(pop, 1)[0]
     return pop, history
+
+
+def run_small_real_evolution(pop_size: int = 5, generations: int = 3, verbose: bool = True):
+    """Runs a tiny real benchmark-driven evolution cycle to validate the GA objective."""
+    toolbox = setup_toolbox(evaluate_real_genome)
+    _, history = run_evolution_loop(
+        toolbox=toolbox,
+        pop_size=pop_size,
+        generations=generations,
+        cxpb=0.5,
+        mutpb=0.2,
+        verbose=verbose,
+    )
+
+    print("\nSmall real evolution summary:")
+    for entry in history:
+        print(f"Gen {entry['generation']}: best_fitness={entry['best_fitness']:.6f}")
+
+    return history
+
+
+if __name__ == "__main__":
+    run_small_real_evolution(pop_size=5, generations=3, verbose=True)
