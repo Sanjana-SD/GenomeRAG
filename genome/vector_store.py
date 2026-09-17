@@ -18,7 +18,7 @@ def get_qdrant_client() -> QdrantClient:
         api_key = os.getenv("QDRANT_API_KEY")
         if not url or not api_key:
             raise ValueError("QDRANT_URL or QDRANT_API_KEY not set in environment.")
-        _qdrant_client = QdrantClient(url=url, api_key=api_key)
+        _qdrant_client = QdrantClient(url=url, api_key=api_key, timeout=10.0, check_compatibility=False)
         
         # Ensure the collection exists
         # We use check_compatibility=False because the free tier warnings can be verbose
