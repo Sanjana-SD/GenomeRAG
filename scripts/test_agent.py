@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from genome.genome import MemoryGenome
-from genome.vector_store import clear_all_memories, get_qdrant_client
+from genome.vector_store import use_collection, TEST_COLLECTION, clear_all_memories, get_qdrant_client
 from agent.graph import agent_app
 
 def run_agent_conversation(genome: MemoryGenome, genome_name: str):
@@ -108,4 +108,6 @@ def main():
     print("=" * 80)
 
 if __name__ == "__main__":
-    main()
+    # Run in the isolated test collection: never touches chat memory.
+    with use_collection(TEST_COLLECTION):
+        main()

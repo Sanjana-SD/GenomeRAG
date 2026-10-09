@@ -10,11 +10,11 @@ deap==1.4.1
 torch==2.6.0
 sentence-transformers==3.3.1
 
-qdrant-client==1.13.3
+qdrant-client==1.19.1
 
 fastapi==0.115.3
 uvicorn==0.34.0
 
-groq==0.16.0
+groq==1.7.0
 
-supabase==2.15.3
+supabase==2.32.0

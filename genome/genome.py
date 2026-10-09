@@ -71,3 +71,22 @@ class MemoryGenome:
             self.similarity_threshold,
             self.memory_capacity
         ]
+
+
+# The fixed-memory baseline used for comparisons: the hand-picked default
+# configuration GenomeRAG shipped with before any evolution. It never changes.
+BASELINE_GENOME = MemoryGenome()
+
+# Human-readable metadata for each gene (used by the API / UI).
+GENE_INFO = {
+    "forgetting_rate": ("probability", "Chance that each older memory is deleted at a consolidation checkpoint."),
+    "episodic_weight": ("weight", "Score multiplier for raw conversation-turn (episodic) memories during re-ranking."),
+    "semantic_weight": ("weight", "Score multiplier for consolidated summary (semantic) memories during re-ranking."),
+    "confidence_threshold": ("ratio of best score", "Relative cut-off: memories scoring below this fraction of the best retrieved memory's final score are dropped before reasoning."),
+    "compression_ratio": ("fraction", "Share of episodic memories summarised into one semantic memory at each consolidation (min 2)."),
+    "retrieval_top_k": ("memories", "Maximum number of memories passed to the LLM per turn."),
+    "recency_bias": ("weight", "How strongly newer memories are preferred; also sets the per-hour exponential decay rate."),
+    "consolidation_freq": ("turns", "A forgetting/compression/capacity checkpoint runs every N turns."),
+    "similarity_threshold": ("cosine similarity", "Minimum embedding similarity a memory needs to be considered at all."),
+    "memory_capacity": ("memories", "Maximum stored memories; the oldest are pruned at checkpoints beyond this."),
+}

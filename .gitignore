@@ -1,5 +1,6 @@
 # Virtual Environment
 venv/
+.venv/
 
 # Local Environment Variables
 .env
@@ -50,3 +51,6 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+
+# Local persistence fallback (used when Supabase is unavailable)
+data/

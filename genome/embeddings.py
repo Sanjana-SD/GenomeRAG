@@ -3,6 +3,7 @@ from sentence_transformers import SentenceTransformer
 
 # Force CPU execution for sentence transformers to keep resource usage predictable
 device = "cpu"
+EMBEDDING_DIM = 384
 
 # Load the sentence transformer model globally (cached)
 _model = None
@@ -19,7 +20,7 @@ def get_embedding(text: str) -> list[float]:
     model = get_model()
     # If text is empty or only whitespace, return a zero vector
     if not text.strip():
-        return [0.0] * 384
+        return [0.0] * EMBEDDING_DIM
     
     embedding = model.encode(text)
     return embedding.tolist()

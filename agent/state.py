@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, TypedDict
+from typing import List, Dict, Any, Optional, TypedDict
 from genome.genome import MemoryGenome
 
 class AgentState(TypedDict):
@@ -9,3 +9,5 @@ class AgentState(TypedDict):
     step: int                            # Step count for this session (for consolidation frequency checks)
     genome: MemoryGenome                 # The genome defining memory behaviors
     agent_logs: List[str]                # Audit log showing memory retrieval, consolidation, and forgetting details
+    timings: Dict[str, float]            # {'retrieval_ms', 'llm_ms'} measured by the nodes
+    error: Optional[str]                 # Set when the LLM call failed (response then holds the error text)

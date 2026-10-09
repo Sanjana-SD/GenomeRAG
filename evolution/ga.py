@@ -1,5 +1,5 @@
 import random
-from typing import Tuple
+from typing import Callable, Optional, Tuple
 
 from deap import base, creator, tools
 
@@ -82,9 +82,14 @@ def run_evolution_loop(
     generations: int = 10,
     cxpb: float = 0.5,
     mutpb: float = 0.2,
-    verbose: bool = True
+    verbose: bool = True,
+    on_generation: Optional[Callable[[int, list], None]] = None,
 ) -> Tuple[list, list]:
-    """Runs a standard Genetic Algorithm loop for the specified generations."""
+    """Runs a standard Genetic Algorithm loop for the specified generations.
+
+    `on_generation(gen, population)` is called after the initial population is
+    evaluated (gen=0) and after every generation, e.g. for progress/persistence.
+    """
     # Create initial population
     pop = toolbox.population(n=pop_size)
     
@@ -97,7 +102,9 @@ def run_evolution_loop(
     fitnesses = list(map(toolbox.evaluate, pop))
     for ind, fit in zip(pop, fitnesses):
         ind.fitness.values = fit
-        
+    if on_generation:
+        on_generation(0, pop)
+
     history = []
     
     for gen in range(1, generations + 1):
@@ -147,6 +154,8 @@ def run_evolution_loop(
         
         if verbose:
             print(f"{gen:3d} | {best_fit:12.4f} | {avg_fit:11.4f} | {worst_fit:13.4f}")
+        if on_generation:
+            on_generation(gen, pop)
             
     best_ind = tools.selBest(pop, 1)[0]
     return pop, history

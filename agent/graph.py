@@ -8,14 +8,16 @@ from langgraph.graph import StateGraph, START, END
 
 from agent.state import AgentState
 from genome.genome import MemoryGenome
-from genome.vector_store import store_memory, retrieve_memory, get_qdrant_client, COLLECTION_NAME
+from genome.config import groq_model, groq_chat
+from genome.vector_store import store_memory, retrieve_memory, get_qdrant_client, qdrant_enabled, active_collection
 
 # Initialize Groq client
 def get_groq_client():
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise ValueError("GROQ_API_KEY not set in environment.")
-    return Groq(api_key=api_key)
+    # The SDK retries 429/5xx with backoff; extra retries smooth over free-tier rate limits.
+    return Groq(api_key=api_key, max_retries=4)
 
 # Node 1: Retrieve memories
 def retrieve_node(state: AgentState) -> Dict[str, Any]:
@@ -26,15 +28,20 @@ def retrieve_node(state: AgentState) -> Dict[str, Any]:
     logs.append(f"[Step {state.get('step', 0)}] Retrieving memories for query: '{current_input}'")
     
     # Retrieve memories from Qdrant using genome retrieval parameters
+    t0 = time.perf_counter()
     memories = retrieve_memory(genome, current_input)
+    retrieval_ms = (time.perf_counter() - t0) * 1000
     
     logs.append(f"Retrieved {len(memories)} memory/memories matching threshold.")
     for idx, mem in enumerate(memories):
         logs.append(f"  - [{mem['metadata'].get('type')} score={mem['final_score']:.3f}] {mem['text'][:60]}...")
         
+    logs.append(f"Retrieval took {retrieval_ms:.0f} ms (embedding + vector search + re-ranking) in '{active_collection()}'.")
     return {
         "retrieved_memories": memories,
-        "agent_logs": logs
+        "agent_logs": logs,
+        "timings": {**state.get("timings", {}), "retrieval_ms": retrieval_ms},
+        "error": None,
     }
 
 # Node 2: Reason using Groq and retrieved memories
@@ -69,25 +76,26 @@ def reason_node(state: AgentState) -> Dict[str, Any]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": current_input})
     
-    logs.append("Sending reasoning prompt to Groq (Llama 3.1 8B)...")
+    logs.append(f"Sending reasoning prompt to Groq ({groq_model()})...")
     
     # API Call
+    error = None
+    t0 = time.perf_counter()
     try:
-        completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=messages,
-            max_tokens=250,
-            temperature=0.7
-        )
-        response_text = completion.choices[0].message.content.strip()
+        response_text = groq_chat(client, messages, max_tokens=250, temperature=0.7)
         logs.append(f"Generated response: '{response_text[:80]}...'")
     except Exception as e:
+        error = f"{type(e).__name__}: {e}"
         response_text = f"Error during reasoning: {e}"
         logs.append(f"Groq API call error: {e}")
-        
+    llm_ms = (time.perf_counter() - t0) * 1000
+    logs.append(f"LLM generation took {llm_ms:.0f} ms.")
+
     return {
         "response": response_text,
-        "agent_logs": logs
+        "agent_logs": logs,
+        "timings": {**state.get("timings", {}), "llm_ms": llm_ms},
+        "error": error,
     }
 
 # Node 3: Act (Pass-through / Formatting / Verification)
@@ -106,6 +114,11 @@ def write_memory_node(state: AgentState) -> Dict[str, Any]:
     step = state.get("step", 0) + 1
     logs = list(state.get("agent_logs", []))
     
+    # Never store a failed LLM call as a memory.
+    if state.get("error"):
+        logs.append("Skipped memory write: the reasoning step failed.")
+        return {"step": step - 1, "agent_logs": logs}
+
     # 1. Store this interaction as an episodic memory
     interaction_text = f"User: {current_input}\nAssistant: {response}"
     store_memory(
@@ -116,16 +129,19 @@ def write_memory_node(state: AgentState) -> Dict[str, Any]:
     logs.append(f"Stored current conversation turn as episodic memory (Step {step}).")
     
     # 2. Check for consolidation checkpoint
-    if step % genome.consolidation_freq == 0:
+    if step % genome.consolidation_freq == 0 and not qdrant_enabled():
+        logs.append(f"[Consolidation Checkpoint at Step {step}] Skipped: requires Qdrant (local fallback memory active).")
+    elif step % genome.consolidation_freq == 0:
         logs.append(f"[Consolidation Checkpoint at Step {step}] Running forgetting and compression loops...")
         
-        qdrant_client = get_qdrant_client()
+        collection = active_collection()
+        qdrant_client = get_qdrant_client(collection)
         current_time = time.time()
         
         # Scroll to retrieve all points in the collection (up to limit of 1000)
         try:
             scroll_results = qdrant_client.scroll(
-                collection_name=COLLECTION_NAME,
+                collection_name=collection,
                 limit=1000,
                 with_payload=True
             )
@@ -159,7 +175,7 @@ def write_memory_node(state: AgentState) -> Dict[str, Any]:
                     
             if forgotten_ids:
                 qdrant_client.delete(
-                    collection_name=COLLECTION_NAME,
+                    collection_name=collection,
                     points_selector=forgotten_ids
                 )
                 logs.append(f"Forgetting: Pruned {len(forgotten_ids)} old, low-relevance memories.")
@@ -198,13 +214,7 @@ def write_memory_node(state: AgentState) -> Dict[str, Any]:
                 
                 try:
                     groq_client = get_groq_client()
-                    summary_completion = groq_client.chat.completions.create(
-                        model="llama-3.1-8b-instant",
-                        messages=[{"role": "user", "content": summary_prompt}],
-                        max_tokens=150,
-                        temperature=0.3
-                    )
-                    summary_text = summary_completion.choices[0].message.content.strip()
+                    summary_text = groq_chat(groq_client, [{"role": "user", "content": summary_prompt}], max_tokens=150, temperature=0.3)
                     
                     # Store the summary as a semantic memory
                     store_memory(
@@ -216,7 +226,7 @@ def write_memory_node(state: AgentState) -> Dict[str, Any]:
                     # Delete the original episodic memories that were compressed
                     delete_ids = [p.id for p in compress_candidates]
                     qdrant_client.delete(
-                        collection_name=COLLECTION_NAME,
+                        collection_name=collection,
                         points_selector=delete_ids
                     )
                     
@@ -242,7 +252,7 @@ def write_memory_node(state: AgentState) -> Dict[str, Any]:
                 
                 prune_ids = [p.id for p in all_remaining[:overflow]]
                 qdrant_client.delete(
-                    collection_name=COLLECTION_NAME,
+                    collection_name=collection,
                     points_selector=prune_ids
                 )
                 logs.append(f"Capacity: Pruned {len(prune_ids)} overflow memories.")

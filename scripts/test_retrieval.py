@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from genome.genome import MemoryGenome
-from genome.vector_store import store_memory, retrieve_memory, clear_all_memories
+from genome.vector_store import use_collection, TEST_COLLECTION, store_memory, retrieve_memory, clear_all_memories
 
 def test_genome_retrieval():
     print("GenomeRAG - Testing Genome-Driven Retrieval")
@@ -76,4 +76,6 @@ def test_genome_retrieval():
     print("-" * 80)
 
 if __name__ == "__main__":
-    test_genome_retrieval()
+    # Run in the isolated test collection: never touches chat memory.
+    with use_collection(TEST_COLLECTION):
+        test_genome_retrieval()

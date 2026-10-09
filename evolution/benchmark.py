@@ -1,11 +1,11 @@
 import os
 import time
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 from dotenv import load_dotenv
 from groq import Groq
 
 from genome.genome import MemoryGenome
-from genome.vector_store import store_memory, clear_all_memories
+from genome.vector_store import store_memory, clear_all_memories, use_collection, BENCHMARK_COLLECTION
 from agent.graph import agent_app
 
 # Load env variables
@@ -114,102 +114,151 @@ def run_api_call_with_retry(fn, *args, **kwargs):
             return fn(*args, **kwargs)
         except Exception as e:
             err_str = str(e)
-            if "429" in err_str or "Rate limit" in err_str or "rate_limit" in err_str:
+            if isinstance(e, LLMCallError) or "429" in err_str or "Rate limit" in err_str or "rate_limit" in err_str:
                 delay = base_delay * (2 ** attempt)
-                print(f"    [Rate Limit Warning] Received 429. Retrying in {delay:.2f}s... (Attempt {attempt+1}/{max_retries})")
+                print(f"    [Retry] {type(e).__name__}. Retrying in {delay:.2f}s... (Attempt {attempt+1}/{max_retries})")
                 time.sleep(delay)
             else:
                 # Other exceptions
                 raise e
     raise RuntimeError("Failed to complete LLM call after max retries due to rate limits.")
 
+class LLMCallError(RuntimeError):
+    """The agent's reasoning step failed (e.g. Groq rate limit); the answer must not be scored."""
+
+
+def _invoke_agent(state: dict) -> dict:
+    output = agent_app.invoke(state)
+    if output.get("error"):
+        raise LLMCallError(output["error"])
+    return output
+
+
+def evaluate_task_detailed(genome: MemoryGenome, task: dict) -> Dict[str, Any]:
+    """
+    Evaluates a single genome on a single benchmark task in the isolated
+    benchmark collection and returns the full record (answer, scores, timings).
+    """
+    with use_collection(BENCHMARK_COLLECTION):
+        # 1. Clear the benchmark collection for a fresh evaluation (never touches chat memory)
+        clear_all_memories()
+
+        # 2. Pre-seed the facts using the genome (local CPU embeddings, no API cost)
+        for step_idx, fact in enumerate(task["context"]):
+            store_memory(
+                genome=genome,
+                text=fact,
+                metadata={"type": "episodic", "step": step_idx + 1, "timestamp": time.time()}
+            )
+
+        # 3. Formulate state for the final RAG turn
+        state = {
+            "messages": [],  # Empty history to force RAG reliance
+            "current_input": task["query"],
+            "retrieved_memories": [],
+            "response": "",
+            "step": len(task["context"]),
+            "genome": genome,
+            "agent_logs": [],
+            "timings": {},
+        }
+
+        # 4. Invoke the agent and measure end-to-end latency
+        start_time = time.time()
+        error = None
+        output = {}
+        try:
+            output = run_api_call_with_retry(_invoke_agent, state)
+            response_text = output["response"]
+        except Exception as e:
+            print(f"  [Task {task['id']} Error]: {e}")
+            error = f"{type(e).__name__}: {e}"
+            response_text = ""
+        latency = time.time() - start_time
+
+    # 5. Keyword accuracy: fraction of expected keywords present in the answer (case-insensitive)
+    keywords = task["keywords"]
+    response_lower = response_text.lower()
+    matched = [kw for kw in keywords if kw.lower() in response_lower]
+    accuracy = len(matched) / len(keywords) if keywords else 0.0
+
+    timings = output.get("timings", {})
+    return {
+        "id": task["id"],
+        "query": task["query"],
+        "keywords": keywords,
+        "matched": matched,
+        "response": response_text,
+        "accuracy": accuracy,
+        "latency": latency,
+        "retrieval_ms": timings.get("retrieval_ms"),
+        "llm_ms": timings.get("llm_ms"),
+        "retrieved": len(output.get("retrieved_memories", [])),
+        "error": error,
+    }
+
+
 def evaluate_task(genome: MemoryGenome, task: dict) -> Tuple[float, float]:
     """
     Evaluates a single genome on a single benchmark task.
     Returns: (accuracy_score [0.0 - 1.0], latency_seconds)
     """
-    # 1. Clear vector DB for a fresh evaluation
-    clear_all_memories()
-    
-    # 2. Pre-seed the facts into Qdrant using the genome
-    # This runs local embeddings on CPU (costs no API limits)
-    for step_idx, fact in enumerate(task["context"]):
-        store_memory(
-            genome=genome,
-            text=fact,
-            metadata={"type": "episodic", "step": step_idx + 1, "timestamp": time.time()}
-        )
-        
-    # 3. Formulate state for the final RAG turn
-    state = {
-        "messages": [], # Empty history to force RAG reliance
-        "current_input": task["query"],
-        "retrieved_memories": [],
-        "response": "",
-        "step": len(task["context"]),
-        "genome": genome,
-        "agent_logs": []
-    }
-    
-    # 4. Invoke the agent on the query and measure latency
-    start_time = time.time()
-    try:
-        # Wrap the agent invocation to handle rate limits inside it
-        # The agent reasoning node calls Groq, so we handle it here or modify graph
-        # For simplicity, we just execute the graph and retry if it throws rate limits
-        output = run_api_call_with_retry(agent_app.invoke, state)
-        response_text = output["response"]
-    except Exception as e:
-        print(f"  [Task {task['id']} Error]: {e}")
-        response_text = ""
-        
-    latency = time.time() - start_time
-    
-    # 5. Calculate Accuracy
-    keywords = task["keywords"]
-    found_count = 0
-    response_lower = response_text.lower()
-    for kw in keywords:
-        if kw.lower() in response_lower:
-            found_count += 1
-            
-    accuracy = found_count / len(keywords) if keywords else 0.0
-    return accuracy, latency
+    r = evaluate_task_detailed(genome, task)
+    return r["accuracy"], r["latency"]
 
-def evaluate_genome_fitness(genome: MemoryGenome, verbose: bool = False) -> Tuple[float]:
+
+LATENCY_PENALTY = 0.02  # fitness points per second of average latency
+
+
+def run_benchmark(genome: MemoryGenome, verbose: bool = False) -> Dict[str, Any]:
+    """Runs all benchmark tasks and returns aggregate metrics plus per-task records.
+
+    fitness = avg_accuracy - LATENCY_PENALTY * avg_latency_seconds (floored at -10)
     """
-    Runs the genome through the benchmark tasks and calculates a fitness score.
-    Fitness = Average Accuracy - (Average Latency * Latency Penalty Weight)
-    
-    Returns: Tuple of (fitness_score,) to match DEAP expectations.
-    """
-    accuracies = []
-    latencies = []
-    
+    tasks = []
     if verbose:
         print(f"Evaluating genome on {len(BENCHMARK_TASKS)} tasks...")
-        
+
     for task in BENCHMARK_TASKS:
-        accuracy, latency = evaluate_task(genome, task)
-        accuracies.append(accuracy)
-        latencies.append(latency)
-        
+        tasks.append(evaluate_task_detailed(genome, task))
         # Add a tiny rest to prevent Groq burst rate limits
         time.sleep(1.0)
-        
-    avg_accuracy = sum(accuracies) / len(accuracies)
-    avg_latency = sum(latencies) / len(latencies)
-    
+
+    def avg(values):
+        values = [v for v in values if v is not None]
+        return sum(values) / len(values) if values else None
+
+    avg_accuracy = avg([t["accuracy"] for t in tasks])
+    avg_latency = avg([t["latency"] for t in tasks])
+
     # Latency penalty: 0.02 per second of latency.
     # E.g. 1.5 seconds average latency = 0.03 penalty.
     # This prevents overly verbose genomes or deep RAG runs unless they improve accuracy.
-    latency_penalty = avg_latency * 0.02
-    fitness_score = avg_accuracy - latency_penalty
-    
-    # Ensure fitness does not drop below -10.0 in case of extreme errors
-    fitness_score = max(-10.0, fitness_score)
-    
+    fitness_score = max(-10.0, avg_accuracy - avg_latency * LATENCY_PENALTY)
+
     if verbose:
         print(f"Evaluation complete: Accuracy={avg_accuracy*100:.1f}%, Latency={avg_latency:.2f}s, Score={fitness_score:.4f}")
-        
-    return (fitness_score,)
+
+    return {
+        "accuracy": avg_accuracy,
+        "avg_latency": avg_latency,
+        "avg_retrieval_ms": avg([t["retrieval_ms"] for t in tasks]),
+        "avg_llm_ms": avg([t["llm_ms"] for t in tasks]),
+        "fitness": fitness_score,
+        "errors": sum(1 for t in tasks if t["error"]),
+        "tasks": tasks,
+    }
+
+
+def evaluate_genome_fitness(genome: MemoryGenome, verbose: bool = False, details: Optional[dict] = None) -> Tuple[float]:
+    """
+    Runs the genome through the benchmark tasks and calculates a fitness score.
+    Fitness = Average Accuracy - (Average Latency * Latency Penalty Weight)
+
+    If `details` is given it is filled with the full run_benchmark() result.
+    Returns: Tuple of (fitness_score,) to match DEAP expectations.
+    """
+    result = run_benchmark(genome, verbose=verbose)
+    if details is not None:
+        details.update(result)
+    return (result["fitness"],)
