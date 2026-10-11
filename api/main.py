@@ -65,9 +65,13 @@ def _num_tasks() -> int:
 
 @app.on_event("startup")
 def _startup():
-    missing = [v for v in ("GROQ_API_KEY", "QDRANT_URL", "QDRANT_API_KEY", "SUPABASE_URL") if not os.getenv(v)]
+    required = ["GROQ_API_KEY", "QDRANT_URL", "QDRANT_API_KEY"]
+    if store.mode != "local":  # Supabase settings are optional with STORAGE_BACKEND=local
+        required.append("SUPABASE_URL")
+    missing = [v for v in required if not os.getenv(v)]
     if missing:
         log.warning("Missing configuration: %s (see .env.example)", ", ".join(missing))
+    log.info("Storage backend: STORAGE_BACKEND=%s", store.mode)
     # Runs left 'running' by a previous process can never finish: mark them interrupted.
     try:
         for r in store.list_runs(limit=200):
@@ -118,9 +122,11 @@ def health(refresh: bool = False):
         "services": {
             "groq": {**_check_groq(), "model": groq_model()},
             "qdrant": _check_qdrant(),
-            "supabase": {**persistence["supabase"], "key_kind": supabase_key_kind()},
+            "supabase": {**persistence["supabase"],
+                         **({"key_kind": supabase_key_kind()} if persistence["mode"] != "local" else {})},
         },
-        "persistence": {"backend": persistence["backend"], "local_path": persistence["local_path"]},
+        "persistence": {"backend": persistence["backend"], "mode": persistence["mode"],
+                        "local_path": persistence["local_path"], "error": persistence["error"]},
         "memory_backend": "qdrant" if qdrant_enabled() else "local-fallback",
         "active_job": _public_job(),
         "limits": {"max_pop_size": MAX_POP, "max_generations": MAX_GENS, "benchmark_tasks": _num_tasks()},

@@ -30,6 +30,7 @@ const LIFECYCLE = [
 export default function About() {
   const { health, meta } = useApp()
   const s = health?.services
+  const localMode = health?.persistence?.mode === 'local'
   return (
     <>
       <PageHeader title="About GenomeRAG" subtitle="An evolutionary memory framework for autonomous AI agents." />
@@ -64,13 +65,17 @@ export default function About() {
               <code className="font-mono">genomerag_benchmark</code> (evolution scratch space, wiped per task).
             </Box>
             <Box icon={Sparkles} title="Groq LLM" tone="accent">Model from GROQ_MODEL (currently <span className="font-mono">{s?.groq?.model || '…'}</span>).</Box>
-            <Box icon={HardDrive} title="Supabase Postgres" tone="accent">runs, generation_logs, benchmark_results, chat_sessions, chat_messages. Falls back to a local JSON file when unavailable.</Box>
+            <Box icon={HardDrive} title={localMode ? 'Local JSON storage' : 'Supabase Postgres'} tone="accent">
+              runs, generation_logs, benchmark_results, chat_sessions, chat_messages.{' '}
+              {localMode ? <>Saved to <code className="font-mono">data/genomerag_local.json</code> (STORAGE_BACKEND=local; Supabase is not used).</>
+                : 'Falls back to a local JSON file when unavailable.'}
+            </Box>
           </div>
           <div className="mt-4 flex flex-wrap gap-2 text-xs">
-            {['groq', 'qdrant', 'supabase'].map((k) => (
+            {['groq', 'qdrant', ...(localMode ? [] : ['supabase'])].map((k) => (
               <Badge key={k} tone={s?.[k]?.status === 'ok' ? 'ok' : s ? 'error' : 'muted'} dot title={s?.[k]?.detail}>{k}: {s?.[k]?.status || 'checking'}</Badge>
             ))}
-            {health && <Badge tone={health.persistence.backend === 'supabase' ? 'ok' : 'warn'}>persistence: {health.persistence.backend}</Badge>}
+            {health && <Badge tone={health.persistence.error ? 'error' : health.persistence.backend === 'supabase' || localMode ? 'ok' : 'warn'}>persistence: {health.persistence.backend}</Badge>}
           </div>
         </Card>
 

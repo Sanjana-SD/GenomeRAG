@@ -29,6 +29,24 @@ def groq_chat(client, messages, max_tokens: int = 250, temperature: float = 0.7)
     return (completion.choices[0].message.content or "").strip()
 
 
+STORAGE_BACKENDS = ("auto", "local", "supabase")
+
+
+def storage_backend() -> str:
+    """Persistence backend from STORAGE_BACKEND.
+
+    auto (default when unset) - use Supabase if its tables are usable, else the local JSON file
+    local                     - always the local JSON file; Supabase is never contacted
+    supabase                  - always Supabase; errors are reported, never silently replaced
+    """
+    value = (os.getenv("STORAGE_BACKEND") or "auto").strip().lower()
+    if value not in STORAGE_BACKENDS:
+        raise ValueError(
+            f"Invalid STORAGE_BACKEND={os.getenv('STORAGE_BACKEND')!r}: expected one of {', '.join(STORAGE_BACKENDS)}"
+        )
+    return value
+
+
 def supabase_key() -> str:
     """Server-side Supabase key. SUPABASE_SERVICE_ROLE_KEY wins if both are set."""
     return os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY") or ""

@@ -3,12 +3,15 @@
 Two interchangeable backends with the same tiny table API:
 
 * SupabaseBackend - the real database (tables from scripts/schema.sql).
-* LocalBackend    - a JSON file (data/genomerag_local.json) used only when
-  Supabase is not configured/usable. It is always reported as such in /health
-  so nothing pretends to be saved in Supabase when it is not.
+* LocalBackend    - a JSON file (data/genomerag_local.json).
 
-The backend is chosen by probing Supabase (tables exist + a real write/delete
-works). While on the local fallback, Supabase is re-probed at most every 60 s.
+STORAGE_BACKEND selects the backend (see genome.config.storage_backend):
+
+* local    - always the JSON file; Supabase is never contacted.
+* supabase - always Supabase; failures raise PersistenceError (no silent fallback).
+* auto     - (default) probe Supabase (tables exist + a real write/delete works) and
+             fall back to the JSON file, re-probing at most every 60 s. /health always
+             reports which backend is in use, so nothing pretends to be in Supabase.
 """
 import json
 import os
@@ -18,7 +21,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from genome.config import get_supabase_client, supabase_key_kind
+from genome.config import get_supabase_client, storage_backend, supabase_key_kind
 
 TABLES = ["runs", "generation_logs", "benchmark_results", "chat_sessions", "chat_messages"]
 SERIAL_TABLES = {"generation_logs", "benchmark_results", "chat_messages"}
@@ -78,23 +81,51 @@ class SupabaseBackend:
 class LocalBackend:
     name = "local"
 
-    def __init__(self, path=LOCAL_PATH):
-        self.path = path
+    def __init__(self, path=None):
+        self.path = path or LOCAL_PATH
         self.lock = threading.RLock()
         self.data = {t: [] for t in TABLES}
         self.seq = {t: 0 for t in SERIAL_TABLES}
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
+        # Anything in the file this version does not know about is kept and written back unchanged.
+        self.extra_tables: Dict[str, Any] = {}
+        self.extra: Dict[str, Any] = {}
+        if os.path.exists(self.path):
+            self._load()
+        else:
+            self._save()  # initialise an empty store in the expected format
+        # Never hand out an id that already exists, even if the saved counters are missing/stale.
+        for t in SERIAL_TABLES:
+            ids = [r["id"] for r in self.data[t] if isinstance(r.get("id"), int)]
+            self.seq[t] = max([int(self.seq.get(t) or 0)] + ids)
+
+    def _load(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
                 saved = json.load(f)
-            for t in TABLES:
-                self.data[t] = saved.get("tables", {}).get(t, [])
-            self.seq.update(saved.get("seq", {}))
+        except (OSError, ValueError) as e:
+            raise PersistenceError(
+                f"Local storage file {self.path} is empty, unreadable or not valid JSON ({type(e).__name__}: {e}). "
+                "It has been left untouched; restore or move it, then restart the backend.") from e
+        tables = saved.get("tables") if isinstance(saved, dict) else None
+        if not isinstance(tables, dict) or not all(isinstance(tables.get(t, []), list) for t in TABLES):
+            raise PersistenceError(
+                f"Local storage file {self.path} does not have the expected "
+                '{"tables": {...}, "seq": {...}} structure. It has been left untouched.')
+        for t in TABLES:
+            self.data[t] = tables.get(t, [])
+        self.extra_tables = {k: v for k, v in tables.items() if k not in TABLES}
+        self.extra = {k: v for k, v in saved.items() if k not in ("tables", "seq")}
+        self.seq.update({k: v for k, v in (saved.get("seq") or {}).items() if isinstance(v, int)})
 
     def _save(self):
+        """Atomic write: the full content goes to a temp file which then replaces the original."""
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        tmp = self.path + ".tmp"
+        payload = {**self.extra, "tables": {**self.extra_tables, **self.data}, "seq": self.seq}
+        tmp = f"{self.path}.{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"tables": self.data, "seq": self.seq}, f, default=str)
+            json.dump(payload, f, default=str)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.path)
 
     def _prepare(self, table, row):
@@ -170,9 +201,12 @@ def describe_supabase_error(e: Exception) -> str:
 
 class Store:
     def __init__(self):
+        self.mode = storage_backend()  # raises ValueError on an unsupported STORAGE_BACKEND
         self._backend = None
         self._local = None
-        self._status: Dict[str, Any] = {"status": "checking", "detail": ""}
+        self._status: Dict[str, Any] = (
+            {"status": "disabled", "detail": "STORAGE_BACKEND=local: Supabase is not used"}
+            if self.mode == "local" else {"status": "checking", "detail": ""})
         self._checked_at = 0.0
         self._lock = threading.Lock()
 
@@ -197,26 +231,43 @@ class Store:
                       "schema_outdated" if "out of date" in d else "error")
             return {"status": status, "detail": d}
 
+    def _local_backend(self):
+        if self._local is None:
+            self._local = LocalBackend()  # raises PersistenceError if the file is corrupt (file untouched)
+        return self._local
+
     def backend(self, force_probe: bool = False):
         with self._lock:
+            if self.mode == "local":
+                # Explicit local mode: no Supabase client, requests, schema checks or test writes.
+                self._backend = self._local_backend()
+                return self._backend
+
+            on_supabase = self._backend is not None and self._backend.name == "supabase"
             stale = time.time() - self._checked_at > REPROBE_SECONDS
-            if self._backend is None or force_probe or (self._backend.name == "local" and stale):
+            if force_probe or (not on_supabase and (self._checked_at == 0.0 or stale)):
                 result = self._probe_supabase()
                 self._checked_at = time.time()
                 client = result.pop("client", None)
                 self._status = result
-                if client is not None:
-                    self._backend = SupabaseBackend(client)
-                else:
-                    if self._local is None:
-                        self._local = LocalBackend()
-                    self._backend = self._local
+                self._backend = SupabaseBackend(client) if client is not None else None
+
+            if self._backend is not None and self._backend.name == "supabase":
+                return self._backend
+            if self.mode == "supabase":
+                raise PersistenceError(
+                    f"Supabase unavailable (STORAGE_BACKEND=supabase): {self._status.get('detail')}")
+            self._backend = self._local_backend()  # auto: fall back to the JSON file
             return self._backend
 
     def status(self, force_probe: bool = False) -> Dict[str, Any]:
-        b = self.backend(force_probe)
-        return {"backend": b.name, "supabase": dict(self._status),
-                "local_path": "data/genomerag_local.json" if b.name == "local" else None}
+        error = None
+        try:
+            name = self.backend(force_probe).name
+        except PersistenceError as e:
+            name, error = ("supabase" if self.mode == "supabase" else "local"), str(e)
+        return {"backend": name, "mode": self.mode, "supabase": dict(self._status),
+                "local_path": "data/genomerag_local.json" if name == "local" else None, "error": error}
 
     # ------------------------------------------------------------ runs
     def create_run(self, run: Dict[str, Any]):

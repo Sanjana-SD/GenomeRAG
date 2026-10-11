@@ -20,7 +20,7 @@ REQUIRED_PACKAGES = [  # import names
     "dotenv", "langgraph", "langchain_core", "deap", "torch", "sentence_transformers",
     "qdrant_client", "fastapi", "uvicorn", "groq", "supabase",
 ]
-REQUIRED_ENV = ["QDRANT_URL", "QDRANT_API_KEY", "GROQ_API_KEY", "SUPABASE_URL"]
+REQUIRED_ENV = ["QDRANT_URL", "QDRANT_API_KEY", "GROQ_API_KEY"]
 PLACEHOLDER_MARKERS = ("your_", "your-", ".example")
 SCHEMA = {
     "runs": ["run_id", "created_at", "status", "best_fitness", "best_genome", "pop_size", "generations",
@@ -64,22 +64,31 @@ def check_dependencies():
     return True, ", ".join(f"{p}=={version(p)}" for p in ("qdrant-client", "groq", "supabase", "langgraph"))
 
 
+def _storage_mode() -> str:
+    from genome.config import storage_backend
+    return storage_backend()  # raises ValueError for an unsupported STORAGE_BACKEND
+
+
 def check_config():
     import genome.config as config
+    mode = _storage_mode()
     problems = []
-    for var in REQUIRED_ENV:
+    for var in REQUIRED_ENV + ([] if mode == "local" else ["SUPABASE_URL"]):
         val = os.getenv(var, "")
         if not val:
             problems.append(f"{var} is empty")
         elif any(m in val for m in PLACEHOLDER_MARKERS):
             problems.append(f"{var} still has the placeholder value")
-    if not (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")):
-        problems.append("SUPABASE_KEY is empty")
-    if config.supabase_key_kind() in ("publishable", "anon"):
-        problems.append("SUPABASE_KEY is a publishable/anon key; the backend needs the secret (service_role) key")
+    if mode != "local":
+        if not (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")):
+            problems.append("SUPABASE_KEY is empty")
+        if config.supabase_key_kind() in ("publishable", "anon"):
+            problems.append("SUPABASE_KEY is a publishable/anon key; the backend needs the secret (service_role) key")
     if problems:
         return False, "; ".join(problems) + " (edit .env)"
-    return True, f"All required variables set; GROQ_MODEL={config.groq_model()}"
+    storage = ("STORAGE_BACKEND=local (Supabase settings are optional and were not checked)" if mode == "local"
+               else f"STORAGE_BACKEND={mode}")
+    return True, f"All required variables set; GROQ_MODEL={config.groq_model()}; {storage}"
 
 
 def check_qdrant():
@@ -123,7 +132,66 @@ def check_groq():
     return True, f"Model '{model}' replied: {reply!r}"
 
 
+LOCAL_SKIP = "Supabase check skipped because STORAGE_BACKEND=local"
+# Fields every local record must have, with their expected types.
+LOCAL_REQUIRED = {
+    "runs": {"run_id": str},
+    "generation_logs": {"id": int, "run_id": str, "generation_number": int, "best_fitness": (int, float),
+                        "avg_fitness": (int, float)},
+    "benchmark_results": {"id": int, "run_id": str, "agent": str},
+    "chat_sessions": {"session_id": str},
+    "chat_messages": {"id": int, "session_id": str, "role": str, "content": str},
+}
+
+
+def check_local_storage():
+    """Genuine local checks: the app's own loader can read the file, and data/ is writable.
+    The data file itself is never written by this check."""
+    import tempfile
+    from api.store import LOCAL_PATH, LocalBackend, TABLES
+    rel = os.path.relpath(LOCAL_PATH, ROOT)
+    folder = os.path.dirname(LOCAL_PATH)
+    if os.path.isdir(folder):
+        with tempfile.NamedTemporaryFile(dir=folder, prefix=".verify-", suffix=".tmp") as f:
+            f.write(b"ok")
+            f.flush()
+    if not os.path.exists(LOCAL_PATH):
+        writable = "data/ is writable" if os.path.isdir(folder) else "data/ will be created on first start"
+        return True, f"{rel} does not exist yet; the backend will initialise it on first start ({writable}). {LOCAL_SKIP}."
+    backend = LocalBackend(LOCAL_PATH)  # read-only for an existing file; raises PersistenceError if corrupt
+    counts = ", ".join(f"{len(backend.data[t])} {t}" for t in TABLES)
+    return True, f"{rel} loads correctly ({counts}); data/ is writable. {LOCAL_SKIP}."
+
+
+def check_local_schema():
+    from api.store import LOCAL_PATH, LocalBackend
+    if not os.path.exists(LOCAL_PATH):
+        return True, "No local data file yet, so there are no records to validate. Supabase schema check skipped (STORAGE_BACKEND=local)."
+    backend = LocalBackend(LOCAL_PATH)
+    problems = []
+    for table, fields in LOCAL_REQUIRED.items():
+        for i, row in enumerate(backend.data[table]):
+            if not isinstance(row, dict):
+                problems.append(f"{table}[{i}] is not an object")
+                continue
+            for field, typ in fields.items():
+                if not isinstance(row.get(field), typ) or isinstance(row.get(field), bool):
+                    problems.append(f"{table}[{i}].{field} missing or wrong type")
+    if problems:
+        return False, f"{len(problems)} invalid record(s): " + "; ".join(problems[:5])
+    runs = {r["run_id"] for r in backend.data["runs"]}
+    sessions = {s["session_id"] for s in backend.data["chat_sessions"]}
+    orphans = (sum(r["run_id"] not in runs for r in backend.data["generation_logs"] + backend.data["benchmark_results"])
+               + sum(m["session_id"] not in sessions for m in backend.data["chat_messages"]))
+    note = f"; {orphans} record(s) reference a missing run/session" if orphans else ""
+    total = sum(len(v) for v in backend.data.values())
+    return True, (f"All {total} local records have the required fields{note}. "
+                  "Supabase schema check skipped (STORAGE_BACKEND=local).")
+
+
 def check_supabase():
+    if _storage_mode() == "local":
+        return check_local_storage()
     from genome.config import get_supabase_client
     client = get_supabase_client()
     run_id = f"verify-{uuid.uuid4().hex[:8]}"
@@ -141,6 +209,8 @@ def check_supabase():
 
 
 def check_schema():
+    if _storage_mode() == "local":
+        return check_local_schema()
     from genome.config import get_supabase_client
     client = get_supabase_client()
     for table, cols in SCHEMA.items():
@@ -156,10 +226,12 @@ CHECKS = [
     ("collection", "Qdrant collection", check_qdrant_collection),
     ("groq", "Groq LLM", check_groq),
     ("supabase", "Supabase DB", check_supabase),
+    ("storage", "Storage", check_supabase),  # alias: whichever backend STORAGE_BACKEND selects
     ("schema", "Database schema", check_schema),
 ]
 
 HINTS = {
+    "STORAGE_BACKEND": "Set STORAGE_BACKEND in .env to local, supabase or auto (or remove it for auto).",
     "PGRST205": "Table missing: open Supabase -> SQL Editor, paste scripts/schema.sql and run it.",
     "PGRST204": "Column missing: re-run scripts/schema.sql in the Supabase SQL Editor.",
     "42703": "Column missing: re-run scripts/schema.sql in the Supabase SQL Editor.",
@@ -175,10 +247,17 @@ def main():
     selected = set(a.lower() for a in sys.argv[1:])
     print("GenomeRAG Setup Verification")
     print("============================")
+    try:
+        local = _storage_mode() == "local"
+    except ValueError:
+        local = False
+    local_names = {"supabase": "Local storage", "storage": "Local storage", "schema": "Database schema (local)"}
     failed = 0
     for key, name, fn in CHECKS:
-        if selected and key not in selected:
+        if (selected and key not in selected) or (not selected and key == "storage"):
             continue
+        if local:
+            name = local_names.get(key, name)
         try:
             ok, msg = fn()
         except Exception as e:

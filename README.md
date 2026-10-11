@@ -71,7 +71,7 @@ never stored as memories.
 - Python 3.10+ (tested with 3.13) and Node.js 18+ (tested with 22)
 - A Qdrant Cloud cluster and API key
 - A Groq API key
-- A Supabase project. This is optional: without it, data is saved to `data/genomerag_local.json`.
+- Optional: a Supabase project. With `STORAGE_BACKEND=local`, everything is saved to `data/genomerag_local.json` and Supabase isn't needed.
 
 ## Setup
 
@@ -93,13 +93,32 @@ cd frontend; npm install; cd ..
 | `QDRANT_API_KEY` | yes | Qdrant Cloud → cluster → API Keys |
 | `GROQ_API_KEY` | yes | https://console.groq.com/keys |
 | `GROQ_MODEL` | no | Groq model id. Default `openai/gpt-oss-20b` |
+| `STORAGE_BACKEND` | no | `local`, `supabase` or `auto` (default when unset). See "Storage" below |
 | `SUPABASE_URL` | for Supabase | Project Settings → API |
 | `SUPABASE_KEY` | for Supabase | Use the **secret** key (`sb_secret_…` or the legacy `service_role` JWT), not the publishable/anon key |
 | `SUPABASE_SERVICE_ROLE_KEY` | no | Overrides `SUPABASE_KEY` if set |
 | `CORS_ORIGINS` | no | Origins allowed to call the API directly |
 | `VITE_API_URL` (frontend) | no | Backend URL if the UI is hosted separately. **Never** put secrets in `VITE_*` |
 
-### Database schema (Supabase)
+### Storage
+
+`STORAGE_BACKEND` selects where runs, generation logs, benchmark results and chat sessions are saved:
+
+| Value | Behaviour |
+|---|---|
+| `local` | Uses only `data/genomerag_local.json`. Supabase is never contacted, so no client, requests, schema checks or test writes. Supabase settings are optional. The header shows **Storage · Local**. |
+| `supabase` | Uses only Supabase. If it is unusable, the error is reported and nothing falls back. |
+| `auto` (default) | Uses Supabase when its tables are usable, otherwise the local file, with a warning banner. |
+
+Notes on the local file:
+- Writes are atomic: each one goes to a temp file, which then replaces the original.
+- Unknown keys and tables in the file are preserved.
+- An empty or corrupt file is never overwritten. The backend reports a storage error and leaves the file untouched.
+- Back it up like any other data file. It is git-ignored.
+- Stop the backend before editing it by hand, because the running backend rewrites it from memory.
+- Any other `STORAGE_BACKEND` value stops the backend at startup with a configuration error.
+
+### Database schema (Supabase, only for `supabase`/`auto`)
 
 1. Open your Supabase project → **SQL Editor** → **New query**.
 2. Paste the whole of [`scripts/schema.sql`](scripts/schema.sql) and click **Run**. The script is idempotent and safe to re-run.
@@ -116,7 +135,12 @@ Supabase. Data already in the local fallback is not migrated automatically.
 ```powershell
 .\.venv\Scripts\python.exe scripts\verify_setup.py                 # all checks
 .\.venv\Scripts\python.exe scripts\verify_setup.py qdrant groq     # selected checks
+.\.venv\Scripts\python.exe scripts\verify_setup.py config supabase schema   # storage checks
 ```
+
+With `STORAGE_BACKEND=local`, the `supabase` and `schema` checks validate the local file instead. They confirm
+that the app's loader can read it, that `data/` is writable, and that every record has its required fields. The
+output says the Supabase checks were skipped. `storage` is an alias that checks whichever backend is selected.
 
 ## Run locally
 
@@ -162,6 +186,7 @@ failed run keeps its partial results. Runs left `running` by a backend restart a
 .\.venv\Scripts\python.exe -m scripts.test_retrieval     # genome-driven retrieval (genomerag_test collection)
 .\.venv\Scripts\python.exe -m scripts.test_agent         # multi-turn agent, consolidation/forgetting (genomerag_test)
 .\.venv\Scripts\python.exe -m scripts.test_benchmark     # benchmark fitness of two genomes (genomerag_benchmark)
+.\.venv\Scripts\python.exe -m scripts.test_storage       # storage backends (temp files only; no network)
 ```
 
 None of these touch chat memory.
@@ -183,7 +208,8 @@ docker run --env-file .env -p 8000:8000 -v genomerag-data:/app/data genomerag
 
 ## Troubleshooting
 
-- **Header shows "Supabase · Schema missing"**: run `scripts/schema.sql` (see above).
+- **Header shows "Supabase · Schema missing"**: run `scripts/schema.sql` (see above), or set `STORAGE_BACKEND=local` to not use Supabase.
+- **"Storage error: Local storage file … is empty, unreadable or not valid JSON"**: the file was left untouched. Restore it from a backup, or move it away to start fresh, then restart the backend.
 - **"Permission denied"**: you're using the publishable key; switch to the secret key.
 - **Groq `model_not_found`**: the model was retired. Run `verify_setup.py groq` to list available models and set `GROQ_MODEL`.
 - **Rate limits (429)**: the SDK and benchmark retry with backoff. Reduce the population or generations if runs crawl.

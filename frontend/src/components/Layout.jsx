@@ -113,7 +113,14 @@ function Header({ onMenu }) {
         </Badge>
         <ServiceIndicator name={`Groq${s?.groq?.model ? ` (${s.groq.model.split('/').pop()})` : ''}`} svc={s?.groq} backend={backend} />
         <ServiceIndicator name="Qdrant" svc={s?.qdrant} backend={backend} />
-        <ServiceIndicator name="Supabase" svc={s?.supabase} backend={backend} />
+        {health?.persistence?.mode === 'local' ? (
+          <Badge tone={health.persistence.error ? 'error' : 'muted'} dot
+            title={health.persistence.error || `STORAGE_BACKEND=local — data saved to ${health.persistence.local_path}`}>
+            Storage <span className="hidden font-normal opacity-80 xl:inline">· {health.persistence.error ? 'Error' : 'Local'}</span>
+          </Badge>
+        ) : (
+          <ServiceIndicator name="Supabase" svc={s?.supabase} backend={backend} />
+        )}
         <button
           title="Re-check services now"
           onClick={async () => { setRefreshing(true); await refreshHealth(true); setRefreshing(false) }}
@@ -128,7 +135,16 @@ function Header({ onMenu }) {
 
 export function PersistenceBanner() {
   const { health } = useApp()
-  if (!health || health.persistence?.backend !== 'local') return null
+  if (!health) return null
+  if (health.persistence?.error) {
+    return (
+      <div className="border-b border-danger/30 bg-danger/10 px-4 py-2 text-xs text-rose-200 sm:px-6">
+        <b className="font-semibold">Storage error:</b> {health.persistence.error}
+      </div>
+    )
+  }
+  // Only warn when local storage is an automatic fallback; STORAGE_BACKEND=local is intentional.
+  if (health.persistence?.backend !== 'local' || health.persistence?.mode === 'local') return null
   const sb = health.services?.supabase
   return (
     <div className="border-b border-warn/20 bg-warn/5 px-4 py-2 text-xs text-amber-100 sm:px-6">

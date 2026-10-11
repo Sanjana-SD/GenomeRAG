@@ -77,7 +77,11 @@ export default function History() {
     <>
       <PageHeader title="Experiment History" subtitle="Every recorded evolution run, loaded from persistent storage."
         actions={<>
-          {backendName && <Badge tone={backendName === 'supabase' ? 'ok' : 'warn'} dot>storage: {backendName === 'supabase' ? 'Supabase' : 'local fallback file'}</Badge>}
+          {backendName && (
+            <Badge tone={backendName === 'supabase' || health?.persistence?.mode === 'local' ? 'ok' : 'warn'} dot>
+              storage: {backendName === 'supabase' ? 'Supabase' : health?.persistence?.mode === 'local' ? 'Local' : 'local fallback file'}
+            </Badge>
+          )}
           <Button icon={RefreshCw} onClick={refreshRuns}>Refresh</Button>
           <EvolveButton />
         </>} />
