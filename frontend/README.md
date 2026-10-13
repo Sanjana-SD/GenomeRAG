@@ -6,7 +6,8 @@ memories and agent logs, and run and browse evolution runs.
 ```powershell
 npm install
 npm run dev     # http://localhost:5173, proxies /api and /health to the backend on :8000
-npm run build
+npm run build   # production build to dist/
 ```
 
-See the root README for configuration (`BACKEND_URL`, `VITE_API_URL`).
+For a deployed build (Vercel), set `VITE_API_BASE_URL` to the backend URL and redeploy. See `.env.example` and the
+root README.

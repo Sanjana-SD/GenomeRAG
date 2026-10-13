@@ -1,7 +1,8 @@
 """GenomeRAG FastAPI backend.
 
-Run from the repo root:
+Run from the backend/ directory:
     python -m uvicorn api.main:app --reload --port 8000
+Render:  Root Directory `backend`, start command `uvicorn api.main:app --host 0.0.0.0 --port $PORT`.
 """
 import logging
 import os
@@ -24,14 +25,45 @@ from genome.vector_store import (
     get_qdrant_client, qdrant_enabled, use_collection,
 )
 
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("genomerag")
 
 app = FastAPI(title="GenomeRAG API", version="2.0.0")
 
-_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+# Browser origins allowed to call the API.
+#   FRONTEND_ORIGINS - comma-separated list (CORS_ORIGINS is the older name; both are honoured)
+#   The deployed production frontend is always allowed so a stale local setting can never lock it out.
+PRODUCTION_FRONTEND = "https://genome-rag-tcvs.vercel.app"
+LOCAL_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+
+
+def parse_origins(raw: str) -> List[str]:
+    origins = []
+    for o in (raw or "").split(","):
+        o = o.strip().rstrip("/")
+        if not o:
+            continue
+        if o == "*":
+            log.warning("Ignoring '*' in FRONTEND_ORIGINS: list the exact origins instead.")
+            continue
+        origins.append(o)
+    return origins
+
+
+def build_allowed_origins() -> List[str]:
+    configured = parse_origins(os.getenv("FRONTEND_ORIGINS", "")) + parse_origins(os.getenv("CORS_ORIGINS", ""))
+    merged = (configured or parse_origins(LOCAL_ORIGINS)) + [PRODUCTION_FRONTEND]
+    return list(dict.fromkeys(merged))  # de-duplicate, keep order
+
+
+ALLOWED_ORIGINS = build_allowed_origins()
+# Optional: a regex for Vercel preview URLs, e.g. https://genome-rag-.*-<team>\.vercel\.app (anchored by Starlette).
+ALLOWED_ORIGIN_REGEX = os.getenv("FRONTEND_ORIGIN_REGEX") or None
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in _origins if o.strip()],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
+    allow_credentials=False,  # the API uses no cookies; never combine credentials with broad origins
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -71,7 +103,7 @@ def _startup():
     missing = [v for v in required if not os.getenv(v)]
     if missing:
         log.warning("Missing configuration: %s (see .env.example)", ", ".join(missing))
-    log.info("Storage backend: STORAGE_BACKEND=%s", store.mode)
+    log.info("Storage backend: STORAGE_BACKEND=%s; CORS origins: %s", store.mode, ", ".join(ALLOWED_ORIGINS))
     # Runs left 'running' by a previous process can never finish: mark them interrupted.
     try:
         for r in store.list_runs(limit=200):
@@ -112,6 +144,12 @@ def _check_qdrant() -> Dict[str, Any]:
     except Exception as e:
         status = "auth_error" if "403" in str(e) or "401" in str(e) else "error"
         return {"status": status, "detail": f"{type(e).__name__}: {str(e)[:200]}"}
+
+
+@app.get("/healthz")
+def healthz():
+    """Cheap liveness probe (no external calls): use this as Render's Health Check Path."""
+    return {"status": "ok"}
 
 
 @app.get("/health")
@@ -536,6 +574,7 @@ def list_benchmarks():
 
 
 # ======================================================================= static frontend
-_DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "dist")
+# Optional single-server mode: if the frontend has been built next to backend/, serve it too.
+_DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "frontend", "dist")
 if os.path.isdir(_DIST):
     app.mount("/", StaticFiles(directory=_DIST, html=True), name="frontend")

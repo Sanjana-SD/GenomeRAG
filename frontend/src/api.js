@@ -1,6 +1,11 @@
-// Base URL of the backend. Empty = same origin (Vite dev proxy or the FastAPI-served build).
+// Base URL of the backend (set VITE_API_BASE_URL at build time; VITE_API_URL is the older name).
+// Empty = same origin: the Vite dev proxy, or the FastAPI-served build.
 // Only public configuration belongs here - never put API keys in VITE_* variables.
-const BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
+const BASE = (import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '')
+const MISSING_BASE_HINT =
+  import.meta.env.PROD && !BASE
+    ? ' VITE_API_BASE_URL is not set for this build, so requests go to this site instead of the backend (set it in Vercel and redeploy).'
+    : ''
 
 export class ApiError extends Error {
   constructor(message, status) {
@@ -14,7 +19,7 @@ async function request(path, options = {}) {
   try {
     res = await fetch(BASE + path, { headers: { 'Content-Type': 'application/json' }, ...options })
   } catch {
-    throw new ApiError('Cannot reach the GenomeRAG backend. Is it running on port 8000?', 0)
+    throw new ApiError(`Cannot reach the GenomeRAG backend. Is it running and reachable?${MISSING_BASE_HINT}`, 0)
   }
   const body = await res.json().catch(() => null)
   if (!res.ok) {

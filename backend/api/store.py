@@ -25,7 +25,10 @@ from genome.config import get_supabase_client, storage_backend, supabase_key_kin
 
 TABLES = ["runs", "generation_logs", "benchmark_results", "chat_sessions", "chat_messages"]
 SERIAL_TABLES = {"generation_logs", "benchmark_results", "chat_messages"}
-LOCAL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "genomerag_local.json")
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# GENOMERAG_DATA_DIR lets a host with a persistent disk (e.g. Render disk mounted at /var/data) keep the file there.
+DATA_DIR = os.getenv("GENOMERAG_DATA_DIR") or os.path.join(BACKEND_DIR, "data")
+LOCAL_PATH = os.path.join(DATA_DIR, "genomerag_local.json")
 REPROBE_SECONDS = 60
 
 
@@ -267,7 +270,7 @@ class Store:
         except PersistenceError as e:
             name, error = ("supabase" if self.mode == "supabase" else "local"), str(e)
         return {"backend": name, "mode": self.mode, "supabase": dict(self._status),
-                "local_path": "data/genomerag_local.json" if name == "local" else None, "error": error}
+                "local_path": "data/genomerag_local.json" if name == "local" else None, "error": error}  # display name only
 
     # ------------------------------------------------------------ runs
     def create_run(self, run: Dict[str, Any]):

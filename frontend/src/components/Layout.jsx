@@ -166,7 +166,8 @@ export function Layout({ children }) {
         <PersistenceBanner />
         {backend === 'offline' && (
           <div className="border-b border-danger/30 bg-danger/10 px-4 py-2 text-xs text-rose-200 sm:px-6">
-            Cannot reach the backend. Start it with <code className="font-mono">.\.venv\Scripts\python.exe -m uvicorn api.main:app --port 8000</code>. Retrying automatically…
+            Cannot reach the backend. Locally, start it from <code className="font-mono">backend/</code> with <code className="font-mono">python -m uvicorn api.main:app --port 8000</code>;
+            on a deployed site, check that <code className="font-mono">VITE_API_BASE_URL</code> points to the running backend. Retrying automatically…
           </div>
         )}
         <main className="mx-auto max-w-[1400px] p-4 sm:p-6">{children}</main>

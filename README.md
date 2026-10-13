@@ -15,22 +15,45 @@ The web app has six pages:
 | **Experiment History** | Every persisted run, plus per-generation logs |
 | **About / Architecture** | System diagram, memory lifecycle, fitness function, limitations |
 
-## Architecture
+## Project structure
+
+The frontend and backend are deployed independently: the frontend on **Vercel**, the backend on **Render**.
 
 ```
-React 18 + Vite 6 + Tailwind 4 + Recharts  ──HTTP──>  FastAPI (api/main.py)
-                                                       ├─ LangGraph agent (agent/graph.py): retrieve → reason → act → write memory
-                                                       ├─ DEAP GA (evolution/ga.py) + benchmark (evolution/benchmark.py), in a background thread
-                                                       ├─ Storage (api/store.py): Supabase, or the local JSON fallback
-                                                       ├─ Qdrant Cloud: vector memory, one collection per workload
-                                                       ├─ sentence-transformers all-MiniLM-L6-v2 (384-d, CPU)
-                                                       └─ Groq (GROQ_MODEL, default openai/gpt-oss-20b)
+GenomeRAG/
+├── frontend/                  React 18 + Vite 6 + Tailwind 4 + Recharts  (deployed on Vercel)
+│   ├── src/                   api.js is the single place that talks to the backend
+│   ├── package.json, package-lock.json, vite.config.js, index.html
+│   └── .env.example           VITE_API_BASE_URL (public value only)
+├── backend/                   FastAPI service  (deployed on Render, Root Directory = backend)
+│   ├── api/                   main.py (FastAPI app: api.main:app) and store.py (persistence)
+│   ├── agent/                 LangGraph agent: retrieve → reason → act → write memory
+│   ├── genome/                MemoryGenome, config, embeddings, Qdrant vector store
+│   ├── evolution/             DEAP genetic algorithm and the recall benchmark
+│   ├── scripts/               schema.sql, verify_setup.py, developer test scripts
+│   ├── tests/                 offline pytest smoke tests
+│   ├── data/                  local JSON storage (git-ignored)
+│   ├── requirements.txt, requirements-dev.txt, .python-version, .env.example
+└── README.md
+```
+
+Python packages keep their names (`api`, `agent`, `genome`, `evolution`) and are imported relative to `backend/`.
+That is why the app entry point is `api.main:app`. Always run Python commands from inside `backend/`.
+
+```
+Browser ── React UI (Vercel) ──HTTPS──> FastAPI (Render)
+                                         ├─ LangGraph agent (agent/graph.py)
+                                         ├─ DEAP GA + benchmark (evolution/), in a background thread
+                                         ├─ Storage (api/store.py): local JSON file, or Supabase
+                                         ├─ Qdrant Cloud: vector memory, one collection per workload
+                                         ├─ sentence-transformers all-MiniLM-L6-v2 (384-d, CPU)
+                                         └─ Groq (GROQ_MODEL, default openai/gpt-oss-20b)
 ```
 
 ### Memory isolation (Qdrant)
 
-Each workload has its own collection ([genome/vector_store.py](genome/vector_store.py)). Code selects one with
-`use_collection(...)`, which is a context variable, so it works per request and per thread:
+Each workload has its own collection ([backend/genome/vector_store.py](backend/genome/vector_store.py)). Code selects one
+with `use_collection(...)`, which is a context variable, so it works per request and per thread:
 
 | Collection | Used by | Ever cleared by code? |
 |---|---|---|
@@ -50,9 +73,9 @@ Retrieval runs these steps in order:
 4. Drop memories scoring below `confidence_threshold` × the best memory's score.
 5. Keep `retrieval_top_k`.
 
-`confidence_threshold` was previously stored but never used. It is now this relative cut-off: 0 keeps everything,
-and 1 keeps only memories tied with the best one. Consolidation (`consolidation_freq`, `forgetting_rate`,
-`compression_ratio`, `memory_capacity`) runs at checkpoints during chats.
+`confidence_threshold` is this relative cut-off: 0 keeps everything, and 1 keeps only memories tied with the best
+one. Consolidation (`consolidation_freq`, `forgetting_rate`, `compression_ratio`, `memory_capacity`) runs at
+checkpoints during chats.
 
 ### Fitness
 
@@ -61,31 +84,57 @@ fitness = mean keyword accuracy − 0.02 × mean end-to-end task latency (second
 ```
 
 Accuracy is keyword matching: the share of expected keywords that appear in the answer. It is not a semantic
-evaluation. The baseline is the fixed default genome (`BASELINE_GENOME` in [genome/genome.py](genome/genome.py)).
-
-An LLM failure, such as a rate limit, is retried. It is never scored as a wrong answer, and failed replies are
-never stored as memories.
+evaluation. The baseline is the fixed default genome (`BASELINE_GENOME` in
+[backend/genome/genome.py](backend/genome/genome.py)). An LLM failure such as a rate limit is retried. It is never
+scored as a wrong answer, and failed replies are never stored as memories.
 
 ## Prerequisites
 
 - Python 3.10+ (tested with 3.13) and Node.js 18+ (tested with 22)
 - A Qdrant Cloud cluster and API key
 - A Groq API key
-- Optional: a Supabase project. With `STORAGE_BACKEND=local`, everything is saved to `data/genomerag_local.json` and Supabase isn't needed.
+- Optional: a Supabase project. With `STORAGE_BACKEND=local`, everything is saved to `backend/data/genomerag_local.json`.
 
-## Setup
+## Local development (no Docker)
 
 ```powershell
 git clone <repo-url>
 cd GenomeRAG
+
+# Backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-Copy-Item .env.example .env        # then fill in the values
-cd frontend; npm install; cd ..
+cd backend
+python -m pip install -r requirements-dev.txt      # runtime deps + pytest; use requirements.txt for runtime only
+Copy-Item .env.example .env                        # then fill in the values (see "Environment variables")
+
+# Frontend (second terminal)
+cd frontend
+npm install
 ```
 
-### Environment variables (`.env`, backend only)
+The backend reads `.env` from `backend/` or from the repo root, so an existing root `.env` keeps working.
+
+**Start the backend** (from `backend/`; the first start takes ~15 s while PyTorch loads):
+
+```powershell
+python -m uvicorn api.main:app --reload --port 8000
+```
+
+**Start the frontend** (from `frontend/`):
+
+```powershell
+npm run dev          # http://localhost:5173, proxies /api and /health to http://127.0.0.1:8000
+```
+
+Locally, leave `VITE_API_BASE_URL` unset. To point the dev server at another backend, set `BACKEND_URL` for the proxy.
+
+**Single server (optional):** run `npm run build` in `frontend/`, then open http://localhost:8000. If `frontend/dist`
+exists, FastAPI serves it next to the API.
+
+### Environment variables
+
+**Backend** (`backend/.env` locally; the Render "Environment" tab in production):
 
 | Variable | Required | Description |
 |---|---|---|
@@ -95,10 +144,21 @@ cd frontend; npm install; cd ..
 | `GROQ_MODEL` | no | Groq model id. Default `openai/gpt-oss-20b` |
 | `STORAGE_BACKEND` | no | `local`, `supabase` or `auto` (default when unset). See "Storage" below |
 | `SUPABASE_URL` | for Supabase | Project Settings → API |
-| `SUPABASE_KEY` | for Supabase | Use the **secret** key (`sb_secret_…` or the legacy `service_role` JWT), not the publishable/anon key |
+| `SUPABASE_KEY` | for Supabase | The **secret** key (`sb_secret_…` or legacy `service_role`), never the publishable key |
 | `SUPABASE_SERVICE_ROLE_KEY` | no | Overrides `SUPABASE_KEY` if set |
-| `CORS_ORIGINS` | no | Origins allowed to call the API directly |
-| `VITE_API_URL` (frontend) | no | Backend URL if the UI is hosted separately. **Never** put secrets in `VITE_*` |
+| `FRONTEND_ORIGINS` | no | Comma-separated browser origins allowed by CORS (`CORS_ORIGINS` is the older name; both work) |
+| `FRONTEND_ORIGIN_REGEX` | no | Regex for Vercel preview URLs |
+| `GENOMERAG_DATA_DIR` | no | Folder for the local JSON storage (e.g. a Render disk). Default `backend/data` |
+| `LOG_LEVEL` | no | `INFO` (default), `DEBUG`, `WARNING` |
+
+**Frontend** (`frontend/.env.local` locally; Vercel → Settings → Environment Variables):
+
+| Variable | Required | Description |
+|---|---|---|
+| `VITE_API_BASE_URL` | production only | The Render service URL, e.g. `https://<your-service>.onrender.com`, with no trailing slash |
+
+Only `VITE_*` values are embedded into the browser bundle, so never put an API key or Supabase secret in one.
+`VITE_API_URL` still works as the older name.
 
 ### Storage
 
@@ -106,7 +166,7 @@ cd frontend; npm install; cd ..
 
 | Value | Behaviour |
 |---|---|
-| `local` | Uses only `data/genomerag_local.json`. Supabase is never contacted, so no client, requests, schema checks or test writes. Supabase settings are optional. The header shows **Storage · Local**. |
+| `local` | Uses only the local JSON file. Supabase is never contacted, so no client, requests, schema checks or test writes. Supabase settings are optional. The header shows **Storage · Local**. |
 | `supabase` | Uses only Supabase. If it is unusable, the error is reported and nothing falls back. |
 | `auto` (default) | Uses Supabase when its tables are usable, otherwise the local file, with a warning banner. |
 
@@ -117,53 +177,40 @@ Notes on the local file:
 - Back it up like any other data file. It is git-ignored.
 - Stop the backend before editing it by hand, because the running backend rewrites it from memory.
 - Any other `STORAGE_BACKEND` value stops the backend at startup with a configuration error.
+- On Render's free plan the disk is wiped on every restart or redeploy (see "Deploying the backend on Render").
 
 ### Database schema (Supabase, only for `supabase`/`auto`)
 
 1. Open your Supabase project → **SQL Editor** → **New query**.
-2. Paste the whole of [`scripts/schema.sql`](scripts/schema.sql) and click **Run**. The script is idempotent and safe to re-run.
+2. Paste the whole of [`backend/scripts/schema.sql`](backend/scripts/schema.sql) and click **Run**. It is idempotent and safe to re-run.
    It creates `runs`, `generation_logs`, `benchmark_results`, `chat_sessions` and `chat_messages`.
 3. Put the **secret** key in `SUPABASE_KEY`. RLS is enabled with no public policies, so the publishable key cannot read or write.
-4. Run `.\.venv\Scripts\python.exe scripts\verify_setup.py`, or click ⟳ in the app header.
+4. From `backend/`, run `python scripts\verify_setup.py`, or click ⟳ in the app header.
 
-The backend checks Supabase by confirming the tables exist and that a test write succeeds. If that check fails, the
-app uses the local JSON fallback and shows a banner explaining why, so nothing is ever falsely reported as saved to
-Supabase. Data already in the local fallback is not migrated automatically.
+The browser never talks to Supabase or Qdrant directly: only the backend holds those credentials.
 
-## Verification
+## Verification and tests
 
-```powershell
-.\.venv\Scripts\python.exe scripts\verify_setup.py                 # all checks
-.\.venv\Scripts\python.exe scripts\verify_setup.py qdrant groq     # selected checks
-.\.venv\Scripts\python.exe scripts\verify_setup.py config supabase schema   # storage checks
-```
-
-With `STORAGE_BACKEND=local`, the `supabase` and `schema` checks validate the local file instead. They confirm
-that the app's loader can read it, that `data/` is writable, and that every record has its required fields. The
-output says the Supabase checks were skipped. `storage` is an alias that checks whichever backend is selected.
-
-## Run locally
-
-**Backend** (from the repo root; the first start takes about 15 s while PyTorch loads):
+From `backend/`, with the project venv active:
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn api.main:app --reload --port 8000
+python scripts\verify_setup.py                       # all checks (Qdrant, Groq, storage, config)
+python scripts\verify_setup.py config supabase schema   # storage checks; validates the local file in local mode
+python -m pytest tests -q                            # offline smoke tests: routes, CORS, validation (no external calls)
+python -m scripts.test_storage                       # storage backends (temp files only; no network)
+python -m scripts.test_retrieval                     # genome-driven retrieval (uses Qdrant, genomerag_test collection)
+python -m scripts.test_agent                         # multi-turn agent (uses Qdrant + Groq, genomerag_test collection)
+python -m scripts.test_benchmark                     # benchmark fitness of two genomes (uses Qdrant + Groq)
 ```
 
-**Frontend (dev):**
-
-```powershell
-cd frontend
-npm run dev              # http://localhost:5173 (proxies /api and /health to :8000)
-```
-
-**Or a single server:** run `npm run build` in `frontend/`, then open http://localhost:8000. FastAPI serves `frontend/dist`.
+None of these touch chat memory.
 
 ## API
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/health` | Real probes of Groq (model list), Qdrant and Supabase (tables and write), plus the active job and limits |
+| GET | `/healthz` | Cheap liveness probe: `{"status":"ok"}`, no external calls. Use it as Render's health check |
+| GET | `/health` | Real probes of Groq, Qdrant and Supabase (if used), plus the active job and limits. Always returns 200 |
 | GET | `/api/genome/default` | Default and baseline genome, bounds, and per-gene descriptions |
 | GET | `/api/best-genome` | Best genome across completed runs |
 | POST | `/api/chat` | `{message, agent: "evolved"\|"baseline", session_id?, genome?, genome_source?}` returns the reply plus `timings {retrieval_ms, llm_ms, total_ms}`, memories and trace |
@@ -177,49 +224,80 @@ npm run dev              # http://localhost:5173 (proxies /api and /health to :8
 | POST | `/api/benchmark` | `{run_id}` re-benchmarks that run's best genome against the baseline |
 | GET | `/api/benchmarks` | All benchmark executions (for trends) |
 
-Only one evolution or benchmark job runs at a time. Generation logs are saved as each generation finishes, so a
-failed run keeps its partial results. Runs left `running` by a backend restart are marked `interrupted`.
+## Deploying the backend on Render
 
-## Developer scripts (from the repo root)
+Create a **Web Service** from your GitHub repo with the native **Python** runtime (not Docker):
 
-```powershell
-.\.venv\Scripts\python.exe -m scripts.test_retrieval     # genome-driven retrieval (genomerag_test collection)
-.\.venv\Scripts\python.exe -m scripts.test_agent         # multi-turn agent, consolidation/forgetting (genomerag_test)
-.\.venv\Scripts\python.exe -m scripts.test_benchmark     # benchmark fitness of two genomes (genomerag_benchmark)
-.\.venv\Scripts\python.exe -m scripts.test_storage       # storage backends (temp files only; no network)
-```
+| Setting | Value |
+|---|---|
+| Root Directory | `backend` |
+| Build Command | `pip install -r requirements.txt` |
+| Start Command | `uvicorn api.main:app --host 0.0.0.0 --port $PORT` |
+| Health Check Path | `/healthz` |
+| Python version | from `backend/.python-version` (`3.13.5`); or set the env var `PYTHON_VERSION=3.13.5` |
 
-None of these touch chat memory.
+Environment variables to set on Render (names only; get the values from your provider dashboards):
 
-## Deployment
+`GROQ_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`, `GROQ_MODEL`, `STORAGE_BACKEND`, `FRONTEND_ORIGINS`
+(and `SUPABASE_URL`, `SUPABASE_KEY` only if `STORAGE_BACKEND` is `supabase` or `auto`).
 
-The repo includes a [`Dockerfile`](Dockerfile). It builds the UI and serves it, together with the API, from one container on port 8000:
+`FRONTEND_ORIGINS` should contain your Vercel URL. `https://genome-rag-tcvs.vercel.app` is always allowed in addition.
+Do not upload a `.env` file.
+
+Things to know before choosing a plan:
+
+- **Memory.** Measured on this project: the server uses about **380 MB right after startup** (PyTorch is imported
+  at startup) and about **460 MB once the embedding model has loaded**, before an evolution run adds more.
+  Render's free plan has **512 MB** and 0.1 CPU, so it is very likely to be killed for running out of memory or to
+  be extremely slow. Plan for **at least 1–2 GB** of RAM. `requirements.txt` pins CPU-only PyTorch wheels so the
+  build stays small.
+- **First request.** The `all-MiniLM-L6-v2` model (~90 MB) is downloaded on first use, not at startup, so the service
+  starts quickly, but the first chat or evolution request is slow.
+- **Free-plan sleep.** Free web services spin down after about 15 minutes without traffic, and the first request
+  afterwards takes about a minute.
+- **Storage.** The free plan has no persistent disk. Either set `STORAGE_BACKEND=supabase`, or use a paid plan with a
+  disk and set `GENOMERAG_DATA_DIR` to its mount path. Qdrant memories are unaffected because they live in Qdrant Cloud.
+- **Long-running evolution.** `POST /api/evolve` returns immediately and the run executes in a thread inside the
+  server process, so `/healthz` and other requests stay responsive. It is **not durable**: if Render restarts,
+  redeploys or spins the service down mid-run, the run stops, and at the next startup it is marked `interrupted`
+  (generations already finished are kept). While the app is open in a browser, its polling keeps the service awake.
+- **One instance only.** Run state and the single-job lock live in memory, so do not scale beyond one instance or worker.
+
+## Deploying the frontend on Vercel
+
+1. Import the repo; set **Root Directory** to `frontend` (preset: Vite; build `vite build`, output `dist`).
+2. Add one environment variable: `VITE_API_BASE_URL` = your Render service URL, with no trailing slash.
+3. Deploy. Vite inlines this value at build time, so **changing it requires a redeploy**.
+4. Remove any backend secrets (`GROQ_API_KEY`, `QDRANT_API_KEY`, `SUPABASE_KEY`, …) from the Vercel project; the frontend does not use them.
+
+## Testing a deployment
 
 ```bash
-docker build -t genomerag .
-docker run --env-file .env -p 8000:8000 -v genomerag-data:/app/data genomerag
+curl https://<your-service>.onrender.com/healthz          # {"status":"ok"}
+curl https://<your-service>.onrender.com/health           # Groq / Qdrant / storage status
+curl -i -H "Origin: https://genome-rag-tcvs.vercel.app" https://<your-service>.onrender.com/health
+#   the response must contain: access-control-allow-origin: https://genome-rag-tcvs.vercel.app
 ```
 
-- It runs on any container host (Render, Railway, Fly.io, Cloud Run, a VM). Give it **≥ 1.5 GB RAM**, because PyTorch and the embedding model are loaded in memory.
-- Set the variables from `.env.example` in the host's secret settings. Don't ship a `.env` file.
-- `$PORT` is respected if the platform sets it.
-- Use a **single instance and a single worker**. Run state and the job lock live in-process.
-- Apply `scripts/schema.sql` to Supabase first. Otherwise the container falls back to `/app/data`, which needs a volume to survive restarts.
+Then open the Vercel site. The header should show API / Groq / Qdrant as connected.
 
 ## Troubleshooting
 
-- **Header shows "Supabase · Schema missing"**: run `scripts/schema.sql` (see above), or set `STORAGE_BACKEND=local` to not use Supabase.
-- **"Storage error: Local storage file … is empty, unreadable or not valid JSON"**: the file was left untouched. Restore it from a backup, or move it away to start fresh, then restart the backend.
-- **"Permission denied"**: you're using the publishable key; switch to the secret key.
-- **Groq `model_not_found`**: the model was retired. Run `verify_setup.py groq` to list available models and set `GROQ_MODEL`.
-- **Rate limits (429)**: the SDK and benchmark retry with backoff. Reduce the population or generations if runs crawl.
-- **Wrong interpreter / `ModuleNotFoundError`**: use `.\.venv\Scripts\python.exe` and run scripts with `-m` from the repo root.
+- **Browser console shows a CORS error**: add the exact frontend origin (scheme + host, no trailing slash) to `FRONTEND_ORIGINS` on Render and redeploy the backend. For Vercel preview URLs use `FRONTEND_ORIGIN_REGEX`.
+- **Frontend says "Cannot reach the backend"**: `VITE_API_BASE_URL` is missing or wrong in Vercel (redeploy after changing it), or the Render service is asleep or crashed. Check `/healthz` directly.
+- **Render deploy fails at "Build"**: check the Root Directory is `backend` and the Python version is 3.13.x. A failed `torch` install usually means an unsupported Python version.
+- **Render service restarts / "Out of memory"**: the plan has too little RAM (see "Memory" above).
+- **`ModuleNotFoundError: No module named 'api'`**: you ran Python from the wrong folder. Run it from `backend/` (on Render, set Root Directory to `backend`).
+- **Header shows "Supabase · Schema missing"**: run `backend/scripts/schema.sql`, or set `STORAGE_BACKEND=local`.
+- **"Storage error: Local storage file … is not valid JSON"**: the file was left untouched. Restore it from a backup, or move it away to start fresh, then restart.
+- **"Permission denied" from Supabase**: you are using the publishable key; switch to the secret key.
+- **Groq `model_not_found`**: the model was retired. Run `python scripts\verify_setup.py groq` to list available models, then set `GROQ_MODEL`.
+- **Missing or placeholder variables**: `verify_setup.py config` names each one; the backend logs missing variables at startup.
 - **Qdrant vector-size error**: a collection was created with another embedding model. Delete it in the Qdrant dashboard and it will be recreated.
-- **"Backend offline" in the UI / CORS errors**: start the backend on :8000. If the UI is on another origin, set `VITE_API_URL` and add that origin to `CORS_ORIGINS`.
 
 ## Known limitations
 
 - Keyword-match accuracy is a coarse, lexical metric. Each fitness value is a single noisy pass with a non-deterministic LLM.
 - The benchmark tests short-horizon recall of two facts. The forgetting, consolidation and capacity genes barely affect it.
 - Evolution is slow (10 LLM calls per genome evaluation) and bounded for the live demo.
-- Single-user demo: no authentication. Long-term chat memory is per agent, shared across that agent's conversations.
+- Single-user demo: no authentication. Anyone who can reach the API can start evolutions (spending your Groq quota) and read or wipe stored data, so keep the backend URL private or add a gateway before sharing it widely.

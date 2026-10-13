@@ -1,8 +1,8 @@
 """GenomeRAG setup verification.
 
-Usage (from the repo root):
-    .\\.venv\\Scripts\\python.exe scripts\\verify_setup.py            # all checks
-    .\\.venv\\Scripts\\python.exe scripts\\verify_setup.py qdrant groq  # only selected checks
+Usage (from backend/, with the project venv):
+    python scripts/verify_setup.py            # all checks
+    python scripts/verify_setup.py qdrant groq  # only selected checks
 
 Checks use the same configuration/code paths as the application (genome.config,
 genome.vector_store). Secrets are never printed.
@@ -41,13 +41,14 @@ def _err(e: Exception) -> str:
 
 
 def check_python():
-    venv = os.path.normcase(os.path.join(ROOT, ".venv"))
-    in_venv = os.path.normcase(sys.prefix).startswith(venv)
+    prefix = os.path.normcase(sys.prefix)
+    in_venv = any(prefix.startswith(os.path.normcase(os.path.join(base, ".venv")))
+                  for base in (ROOT, os.path.dirname(ROOT)))
     if sys.version_info < (3, 10):
         return False, f"Python {sys.version.split()[0]} is too old (need 3.10+)."
     if not in_venv:
         return False, (f"Running {sys.executable}, not the project .venv. "
-                       r"Use .\.venv\Scripts\python.exe scripts\verify_setup.py")
+                       r"Use the project .venv, e.g. ..\.venv\Scripts\python.exe scripts\verify_setup.py")
     return True, f"Python {sys.version.split()[0]} ({sys.executable})"
 
 

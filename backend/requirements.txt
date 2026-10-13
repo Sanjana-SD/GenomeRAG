@@ -1,0 +1,24 @@
+# GenomeRAG backend runtime dependencies (production).
+# Tested on Python 3.13 (see .python-version). Development-only tools live in requirements-dev.txt.
+
+# CPU-only PyTorch wheels: the default Linux wheel on PyPI bundles ~2 GB of CUDA libraries that Render
+# cannot use. With this extra index pip picks torch 2.6.0+cpu, which is smaller and installs faster.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+python-dotenv==1.1.1
+langgraph==0.3.34
+langchain-core==0.3.68
+
+deap==1.4.1
+
+torch==2.6.0
+sentence-transformers==3.3.1
+
+qdrant-client==1.19.1
+
+fastapi==0.115.3
+uvicorn==0.34.0
+
+groq==1.7.0
+
+supabase==2.32.0

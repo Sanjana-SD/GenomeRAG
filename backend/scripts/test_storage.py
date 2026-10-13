@@ -3,7 +3,7 @@
 Runs entirely on temporary files and makes no network calls; the real
 data/genomerag_local.json is only ever read (copied), never written.
 
-    .\\.venv\\Scripts\\python.exe -m scripts.test_storage
+    python -m scripts.test_storage        (run from backend/)
 """
 import hashlib
 import json
