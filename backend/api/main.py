@@ -33,7 +33,10 @@ app = FastAPI(title="GenomeRAG API", version="2.0.0")
 # Browser origins allowed to call the API.
 #   FRONTEND_ORIGINS - comma-separated list (CORS_ORIGINS is the older name; both are honoured)
 #   The deployed production frontend is always allowed so a stale local setting can never lock it out.
-PRODUCTION_FRONTEND = "https://genome-rag-tcvs.vercel.app"
+PRODUCTION_FRONTENDS = [
+    "https://genome-rag.vercel.app",
+    "https://genome-rag-tcvs.vercel.app",
+]
 LOCAL_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 
 
@@ -52,7 +55,7 @@ def parse_origins(raw: str) -> List[str]:
 
 def build_allowed_origins() -> List[str]:
     configured = parse_origins(os.getenv("FRONTEND_ORIGINS", "")) + parse_origins(os.getenv("CORS_ORIGINS", ""))
-    merged = (configured or parse_origins(LOCAL_ORIGINS)) + [PRODUCTION_FRONTEND]
+    merged = (configured or parse_origins(LOCAL_ORIGINS)) + PRODUCTION_FRONTENDS
     return list(dict.fromkeys(merged))  # de-duplicate, keep order
 
 
