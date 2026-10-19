@@ -1,4 +1,4 @@
-﻿# Virtual Environment
+# Virtual Environment
 venv/
 .venv/
 
@@ -54,3 +54,6 @@ lerna-debug.log*
 
 # Local persistence fallback (used when Supabase is unavailable)
 data/
+
+# Nested git clone
+GenomeRAG/
